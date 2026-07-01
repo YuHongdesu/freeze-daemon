@@ -32,21 +32,14 @@ jobs:
             libbpf-dev \
             linux-headers-$(uname -r)
 
-      # 4. 编译 eBPF（智能本地合规检查）
+      # 4. 编译 eBPF
       - name: Compile eBPF program
         run: |
-          if [ ! -f src/vmlinux.h ] || ! grep -q "struct task_struct" src/vmlinux.h 2>/dev/null; then
-            echo "❌ Error: src/vmlinux.h is missing or invalid!"
-            echo "Please obtain a valid arm64 vmlinux.h and place it in src/vmlinux.h"
-            echo "You can extract it from a rooted device using:"
-            echo "  bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h"
-            exit 1
-          fi
-
-          clang -target bpf -O2 -g \
+          clang -target bpf -O2 -g -mcpu=v2 \
             -I src \
             -c src/platform/freeze_monitor.bpf.c \
             -o freeze_monitor.bpf.o
+          ls -lh freeze_monitor.bpf.o
           
           echo "eBPF object: $(ls -lh freeze_monitor.bpf.o)"
 
