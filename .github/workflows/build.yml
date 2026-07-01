@@ -42,26 +42,19 @@ jobs:
             -o freeze_monitor.bpf.o
           ls -lh freeze_monitor.bpf.o
 
-      - name: Cross-compile libbpf for arm64
+      - name: Download prebuilt libbpf for arm64
         run: |
-          NDK=$NDK_HOME
-          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          SYSROOT=$TOOLCHAIN/sysroot
-          CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
-
-          git clone --depth=1 --branch v1.4.0 https://github.com/libbpf/libbpf.git /tmp/libbpf
-          cd /tmp/libbpf/src
-          mkdir -p /tmp/libbpf-build
-          make CC="$CC" \
-               CFLAGS="--sysroot=$SYSROOT -target aarch64-linux-android33" \
-               OBJDIR=/tmp/libbpf-build \
-               BUILD_STATIC_ONLY=1 \
-               -j$(nproc)
-
-          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include/bpf/uapi}
-          cp /tmp/libbpf-build/libbpf.a  $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
-          cp /tmp/libbpf/src/*.h         $GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/
-          cp -r /tmp/libbpf/src/uapi     $GITHUB_WORKSPACE/prebuilt/libbpf/include/bpf/
+          # 使用 nickdesaulniers/libbpf-android 预编译库
+          LIBBPF_URL="https://github.com/nickdesaulniers/libbpf-android/releases/download/v1.4.0/libbpf-android-v1.4.0.tar.gz"
+          mkdir -p /tmp/libbpf-prebuilt
+          cd /tmp/libbpf-prebuilt
+          wget -q "$LIBBPF_URL" -O libbpf.tar.gz
+          tar xf libbpf.tar.gz
+          # 假设压缩包内容为 libbpf.a 和 include/ 目录
+          mkdir -p $GITHUB_WORKSPACE/prebuilt/libbpf/{lib,include}
+          cp libbpf.a $GITHUB_WORKSPACE/prebuilt/libbpf/lib/
+          cp -r include/* $GITHUB_WORKSPACE/prebuilt/libbpf/include/
+          echo "Prebuilt libbpf downloaded"
 
       - name: Compile Daemon (arm64)
         run: |
