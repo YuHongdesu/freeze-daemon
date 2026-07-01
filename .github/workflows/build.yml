@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v5
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK r27d
         run: |
