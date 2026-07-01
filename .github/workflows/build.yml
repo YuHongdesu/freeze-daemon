@@ -139,18 +139,23 @@ jobs:
           mkdir -p /tmp/libbpf && tar -xzf /tmp/libbpf.tar.gz -C /tmp/libbpf --strip-components=1
           cd /tmp/libbpf/src
           mkdir -p /tmp/libbpf-build
-          # NO_PKG_CONFIG=1: 交叉编译环境没有 arm64 目标的 pkg-config，
-          # 改用 EXTRA_CFLAGS/LDLIBS 手动指向上面编好的 zlib/libelf。
-          # BUILD_STATIC_ONLY=y: 只产出 libbpf.a，跳过 .so 相关的版本脚本处理
+
+          # ★★★ 修复点：定义 __poll_t 为 unsigned int ★★★
+          # NDK r27 的 <linux/eventpoll.h> 中 EPOLLIN 宏使用 __poll_t，
+          # 但该类型在用户空间编译环境中未声明。通过 EXTRA_CFLAGS 添加
+          # 宏定义即可绕过此问题。
+          POLL_FIX="-D__poll_t=unsigned\ int"
+
           CC=$CC AR=$AR \
-          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include ${POLL_FIX}" \
           LDLIBS="-lelf -lz" \
           NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
           OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX \
             make -j$(nproc) install_headers 2>&1 | tee /tmp/libbpf-headers.log \
             || { echo "FATAL: libbpf install_headers failed, see log above"; exit 1; }
+
           CC=$CC AR=$AR \
-          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include ${POLL_FIX}" \
           LDLIBS="-lelf -lz" \
           NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
           OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX \
