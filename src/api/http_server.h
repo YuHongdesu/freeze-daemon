@@ -1,7 +1,5 @@
 #pragma once
 #include <string>
-#include <functional>
-#include <unordered_map>
 #include <sstream>
 #include <queue>
 #include <condition_variable>
@@ -12,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include <cstdio>
 #include "core/config_store.h"
 #include "core/app_list.h"
 #include "core/app_state.h"
@@ -29,15 +28,12 @@ public:
     bool start() {
         server_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd_ < 0) { LOG_E(TAG, "socket() failed"); return false; }
-
         int opt = 1;
         setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port        = htons(PORT);
-
         if (::bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) {
             LOG_E(TAG, "bind() failed on port " + std::to_string(PORT)); return false;
         }
@@ -74,21 +70,15 @@ private:
         return req;
     }
 
-    // 主路由：先检查静态文件，再匹配 API
     std::string handle(const Request& req) {
-        // 静态文件服务（提供 Web UI）
-        if (req.path == "/" || req.path == "/index.html") {
-            return serve_static_file("index.html");
-        }
-        // 其他 webroot 下的资源（js/css/image等）
-        if (req.path.find("/static/") == 0 || req.path.find("/webroot/") == 0) {
-            // 提取文件名，路径约定: /static/style.css 或 /webroot/style.css
-            return serve_static_file(req.path.substr(req.path.find('/', 1) + 1));
-        }
+        // 静态文件
+        if (req.path == "/" || req.path == "/index.html") return serve_static_file("index.html");
 
-        // 原有 API 路由
+        // API 路由
         if (req.path == "/api/status")             return handle_status();
         if (req.path == "/api/live")               return handle_live();
+        if (req.path == "/api/apps/user")          return handle_apps_user();
+        if (req.path == "/api/apps/system")        return handle_apps_system();
         if (req.path == "/api/config" && req.method == "GET")  return handle_config_get();
         if (req.path == "/api/config" && req.method == "POST") return handle_config_set(req.body);
         if (req.path == "/api/whitelist")           return handle_list_get(ListType::WHITELIST);
@@ -100,23 +90,20 @@ private:
         return json_response(404, R"({"error":"not found"})");
     }
 
-    // ── API 实现（与之前完全一致，省略重复代码，保留关键函数签名）────────
+    // ── 状态接口 ──
     std::string handle_status() {
         std::ostringstream oss;
         oss << R"({"running":true,"needs_reboot":)"
-            << (RebootFlag::has_pending() ? "true" : "false")
-            << "}";
+            << (RebootFlag::has_pending() ? "true" : "false") << "}";
         return json_response(200, oss.str());
     }
 
     std::string handle_live() {
         auto frozen  = AppStateStore::instance().get_frozen_packages();
         auto running = RunningCache::instance().get_all();
-
         size_t user_frozen = 0;
-        for (const auto& pkg : frozen) {
+        for (const auto& pkg : frozen)
             if (!AppList::instance().is_sys_restricted(pkg)) user_frozen++;
-        }
         size_t sys_limited = AppList::instance().get_sys_blacklist().size();
 
         std::ostringstream oss;
@@ -127,14 +114,24 @@ private:
             << R"(,"apps":[)";
         for (size_t i = 0; i < frozen.size(); ++i) {
             if (i) oss << ",";
-            const auto& pkg = frozen[i];
-            oss << R"({"pkg":")" << pkg << R"(","name":")" << pkg
+            oss << R"({"pkg":")" << frozen[i] << R"(","name":")" << frozen[i]
                 << R"(","procs":1,"mem":"—"})";
         }
         oss << "]}";
         return json_response(200, oss.str());
     }
 
+    // ── 应用列表 ──
+    std::string handle_apps_user() {
+        auto apps = query_packages("pm list packages -3 -U 2>/dev/null");
+        return json_response(200, apps_json(apps));
+    }
+    std::string handle_apps_system() {
+        auto apps = query_packages("pm list packages -s -U 2>/dev/null");
+        return json_response(200, apps_json(apps));
+    }
+
+    // ── 配置（已修正键名映射） ──
     std::string handle_config_get() {
         Config cfg = ConfigStore::instance().get();
         std::ostringstream oss;
@@ -143,7 +140,7 @@ private:
             << R"("bg_delay":)"            << cfg.bg_freeze_delay_ms / 1000
             << R"(,"screen_off_delay":)"   << cfg.screen_off_delay_ms / 1000
             << R"(,"compaction":)"         << b(cfg.compaction_on)
-            << R"(,"wifi_scan":)"          << b(cfg.wifi_scan_off)
+            << R"(,"wifi_scan":)"          << b(!cfg.wifi_scan_off)   // 注意：前端 wifi_scan=true 表示允许扫描，所以取反
             << R"(,"deep_sleep":)"         << b(cfg.deep_sleep_on)
             << R"(,"deep_sleep_delay":)"   << cfg.deep_sleep_delay_ms / 1000
             << R"(,"user_appop_restrict":)"<< b(cfg.user_appop_restrict)
@@ -153,10 +150,11 @@ private:
 
     std::string handle_config_set(const std::string& body) {
         Config cfg = ConfigStore::instance().get();
+        // 直接使用前端键名读取，然后写入 Config 对应字段
         cfg.bg_freeze_delay_ms   = parse_int (body, "bg_delay",           cfg.bg_freeze_delay_ms / 1000) * 1000;
         cfg.screen_off_delay_ms  = parse_int (body, "screen_off_delay",   cfg.screen_off_delay_ms / 1000) * 1000;
         cfg.compaction_on        = parse_bool(body, "compaction",          cfg.compaction_on);
-        cfg.wifi_scan_off        = parse_bool(body, "wifi_scan",           cfg.wifi_scan_off);
+        cfg.wifi_scan_off        = !parse_bool(body, "wifi_scan",          !cfg.wifi_scan_off); // 前端 true=允许扫描 → 存 false 到 wifi_scan_off
         cfg.deep_sleep_on        = parse_bool(body, "deep_sleep",          cfg.deep_sleep_on);
         cfg.deep_sleep_delay_ms  = parse_int (body, "deep_sleep_delay",   cfg.deep_sleep_delay_ms / 1000) * 1000;
         cfg.user_appop_restrict  = parse_bool(body, "user_appop_restrict", cfg.user_appop_restrict);
@@ -166,8 +164,8 @@ private:
                              ok ? R"({"ok":true})" : R"({"error":"save failed"})");
     }
 
+    // ── 黑白名单 ──
     enum class ListType { WHITELIST, BLACKLIST };
-
     std::string handle_list_get(ListType type) {
         auto list = (type == ListType::WHITELIST)
                   ? AppList::instance().get_user_whitelist()
@@ -187,7 +185,6 @@ private:
     std::string handle_list_modify(const std::string& body, ListType type, bool add) {
         std::string pkg = parse_str(body, "pkg");
         if (pkg.empty()) return json_response(400, R"({"error":"pkg required"})");
-
         bool ok;
         if (type == ListType::WHITELIST) {
             ok = add ? AppList::instance().add_user_exempt(pkg)
@@ -197,58 +194,73 @@ private:
                      : AppList::instance().remove_sys_restricted(pkg);
             if (ok) RebootFlag::mark("system_blacklist");
         }
-
         return json_response(ok ? 200 : 500,
                              ok ? R"({"ok":true})" : R"({"error":"failed"})");
     }
 
-    // ── 静态文件服务 ─────────────────────────────────
+    // ── 静态文件（已加 CORS 头） ──
     static constexpr const char* WEBROOT = "/data/adb/modules/freeze-daemon/webroot/";
 
     std::string serve_static_file(const std::string& filename) {
-        // 防止路径穿越，只允许字母数字、点、下划线、横线
         for (char c : filename) {
-            if (!isalnum(c) && c != '.' && c != '_' && c != '-') {
+            if (!isalnum(c) && c != '.' && c != '_' && c != '-')
                 return json_response(403, R"({"error":"forbidden"})");
-            }
         }
+        std::string full = std::string(WEBROOT) + filename;
+        auto content = FileUtil::read_str(full);
+        if (!content) return json_response(404, R"({"error":"not found"})");
 
-        std::string full_path = std::string(WEBROOT) + filename;
-        auto content = FileUtil::read_str(full_path);
-        if (!content) {
-            return json_response(404, R"({"error":"not found"})");
-        }
-
-        // 简单 MIME 类型判断
+        std::string ext = full.substr(full.rfind('.'));
         std::string mime = "text/html";
-        std::string ext;
-        size_t dot_pos = filename.rfind('.');
-        if (dot_pos != std::string::npos) {
-            ext = filename.substr(dot_pos);
-            if (ext == ".css") mime = "text/css";
-            else if (ext == ".js") mime = "application/javascript";
-            else if (ext == ".svg") mime = "image/svg+xml";
-            else if (ext == ".png") mime = "image/png";
-            else if (ext == ".ico") mime = "image/x-icon";
-        }
+        if (ext == ".css") mime = "text/css";
+        else if (ext == ".js") mime = "application/javascript";
+        else if (ext == ".svg") mime = "image/svg+xml";
 
         std::ostringstream oss;
         oss << "HTTP/1.1 200 OK\r\n"
             << "Content-Type: " << mime << "\r\n"
+            << "Access-Control-Allow-Origin: *\r\n"
             << "Cache-Control: max-age=3600\r\n"
             << "Content-Length: " << content->size() << "\r\n"
             << "\r\n" << *content;
         return oss.str();
     }
 
-    // ── 极简 JSON 解析（保持不变）─────────────────────
-    std::string strip_whitespace(const std::string& s) {
-        std::string result;
-        result.reserve(s.size());
-        for (char c : s) {
-            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') result += c;
+    // ── 工具函数 ──
+    struct AppInfo { std::string pkg, name; };
+    std::vector<AppInfo> query_packages(const std::string& cmd) {
+        std::vector<AppInfo> apps;
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) return apps;
+        char buf[512];
+        while (fgets(buf, sizeof(buf), pipe)) {
+            std::string line(buf);
+            auto p = line.find("package:");
+            auto u = line.find("uid:");
+            if (p == std::string::npos || u == std::string::npos) continue;
+            std::string pkg = line.substr(p + 8, u - (p + 8) - 1);
+            if (!pkg.empty()) apps.push_back({pkg, pkg});
         }
-        return result;
+        pclose(pipe);
+        return apps;
+    }
+
+    std::string apps_json(const std::vector<AppInfo>& apps) {
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < apps.size(); ++i) {
+            if (i) oss << ",";
+            oss << R"({"pkg":")" << apps[i].pkg << R"(","name":")" << apps[i].name << R"("})";
+        }
+        oss << "]";
+        return oss.str();
+    }
+
+    // ── JSON 解析 ──
+    std::string strip_whitespace(const std::string& s) {
+        std::string r; r.reserve(s.size());
+        for (char c : s) if (c != ' ' && c != '\t' && c != '\n' && c != '\r') r += c;
+        return r;
     }
 
     int parse_int(const std::string& json, const std::string& key, int def) {
@@ -257,8 +269,7 @@ private:
         auto pos = clean.find(search);
         if (pos == std::string::npos) return def;
         pos += search.size();
-        try { return std::stoi(clean.substr(pos)); }
-        catch (...) { return def; }
+        try { return std::stoi(clean.substr(pos)); } catch (...) { return def; }
     }
 
     bool parse_bool(const std::string& json, const std::string& key, bool def) {
@@ -285,8 +296,7 @@ private:
         std::string status = (code == 200) ? "200 OK"
                            : (code == 400) ? "400 Bad Request"
                            : (code == 404) ? "404 Not Found"
-                           : (code == 403) ? "403 Forbidden"
-                           : "500 Internal Server Error";
+                           : (code == 403) ? "403 Forbidden" : "500 Internal Server Error";
         std::ostringstream oss;
         oss << "HTTP/1.1 " << status << "\r\n"
             << "Content-Type: application/json\r\n"
@@ -296,13 +306,12 @@ private:
         return oss.str();
     }
 
-    // ── 线程池（单 worker）────────────────────────────
+    // ── 线程池 ──
     static constexpr int WORKER_COUNT = 1;
 
     void accept_loop() {
-        for (int i = 0; i < WORKER_COUNT; ++i) {
+        for (int i = 0; i < WORKER_COUNT; ++i)
             workers_.emplace_back(&HttpServer::worker_loop, this);
-        }
         while (running_) {
             int client = ::accept(server_fd_, nullptr, nullptr);
             if (client < 0) continue;
@@ -313,16 +322,11 @@ private:
             shutting_down_ = true;
         }
         queue_cv_.notify_all();
-        for (auto& w : workers_) {
-            if (w.joinable()) w.join();
-        }
+        for (auto& w : workers_) if (w.joinable()) w.join();
     }
 
     void push_client(int fd) {
-        {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
-            client_queue_.push(fd);
-        }
+        { std::lock_guard<std::mutex> lk(queue_mutex_); client_queue_.push(fd); }
         queue_cv_.notify_one();
     }
 
@@ -333,16 +337,11 @@ private:
                 std::unique_lock<std::mutex> lk(queue_mutex_);
                 queue_cv_.wait(lk, [this]{ return shutting_down_ || !client_queue_.empty(); });
                 if (shutting_down_ && client_queue_.empty()) return;
-                fd = client_queue_.front();
-                client_queue_.pop();
+                fd = client_queue_.front(); client_queue_.pop();
             }
-            try {
-                handle_client(fd);
-            } catch (const std::exception& e) {
-                LOG_E(TAG, std::string("Worker exception: ") + e.what());
-            } catch (...) {
-                LOG_E(TAG, "Worker unknown exception");
-            }
+            try { handle_client(fd); }
+            catch (const std::exception& e) { LOG_E(TAG, std::string("Worker: ") + e.what()); }
+            catch (...) { LOG_E(TAG, "Worker unknown exception"); }
         }
     }
 
@@ -350,19 +349,18 @@ private:
         char buf[4096] = {};
         ssize_t n = ::recv(fd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) { ::close(fd); return; }
-
         Request req = parse_request(std::string(buf, n));
         std::string resp = handle(req);
         ::send(fd, resp.c_str(), resp.size(), 0);
         ::close(fd);
     }
 
-    int               server_fd_{-1};
+    int server_fd_{-1};
     std::atomic<bool> running_{false};
-    std::thread       accept_thread_;
+    std::thread accept_thread_;
     std::vector<std::thread> workers_;
-    std::queue<int>          client_queue_;
-    std::mutex                queue_mutex_;
-    std::condition_variable   queue_cv_;
-    bool                       shutting_down_{false};
+    std::queue<int> client_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    bool shutting_down_{false};
 };
