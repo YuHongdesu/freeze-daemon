@@ -14,6 +14,7 @@
 #include "core/config_store.h"
 #include "core/app_list.h"
 #include "core/app_state.h"
+#include "core/app_label_cache.h"
 #include "core/freeze_engine.h"
 #include "util/logger.h"
 #include "util/file_util.h"
@@ -114,7 +115,7 @@ private:
             << R"(,"apps":[)";
         for (size_t i = 0; i < frozen.size(); ++i) {
             if (i) oss << ",";
-            oss << R"({"pkg":")" << frozen[i] << R"(","name":")" << frozen[i]
+            oss << R"({"pkg":")" << frozen[i] << R"(","name":")" << AppLabelCache::instance().get_label(frozen[i])
                 << R"(","procs":1,"mem":"—"})";
         }
         oss << "]}";
@@ -124,14 +125,16 @@ private:
     // ── 应用列表 ──
     std::string handle_apps_user() {
         auto apps = query_packages("pm list packages -3 -U 2>/dev/null");
+        for (auto& a : apps) a.name = AppLabelCache::instance().get_label(a.pkg);
         return json_response(200, apps_json(apps));
     }
     std::string handle_apps_system() {
         auto apps = query_packages("pm list packages -s -U 2>/dev/null");
+        for (auto& a : apps) a.name = AppLabelCache::instance().get_label(a.pkg);
         return json_response(200, apps_json(apps));
     }
 
-    // ── 配置（已修正键名映射） ──
+    // ── 配置（已修正键名映射）──
     std::string handle_config_get() {
         Config cfg = ConfigStore::instance().get();
         std::ostringstream oss;
@@ -140,21 +143,20 @@ private:
             << R"("bg_delay":)"            << cfg.bg_freeze_delay_ms / 1000
             << R"(,"screen_off_delay":)"   << cfg.screen_off_delay_ms / 1000
             << R"(,"compaction":)"         << b(cfg.compaction_on)
-            << R"(,"wifi_scan":)"          << b(!cfg.wifi_scan_off)   // 注意：前端 wifi_scan=true 表示允许扫描，所以取反
+            << R"(,"wifi_scan":)"          << b(!cfg.wifi_scan_off)
             << R"(,"deep_sleep":)"         << b(cfg.deep_sleep_on)
             << R"(,"deep_sleep_delay":)"   << cfg.deep_sleep_delay_ms / 1000
             << R"(,"user_appop_restrict":)"<< b(cfg.user_appop_restrict)
             << "}";
-        return json_response(200, oss.str());
+        return json_response_no_cache(oss.str());
     }
 
     std::string handle_config_set(const std::string& body) {
         Config cfg = ConfigStore::instance().get();
-        // 直接使用前端键名读取，然后写入 Config 对应字段
         cfg.bg_freeze_delay_ms   = parse_int (body, "bg_delay",           cfg.bg_freeze_delay_ms / 1000) * 1000;
         cfg.screen_off_delay_ms  = parse_int (body, "screen_off_delay",   cfg.screen_off_delay_ms / 1000) * 1000;
         cfg.compaction_on        = parse_bool(body, "compaction",          cfg.compaction_on);
-        cfg.wifi_scan_off        = !parse_bool(body, "wifi_scan",          !cfg.wifi_scan_off); // 前端 true=允许扫描 → 存 false 到 wifi_scan_off
+        cfg.wifi_scan_off        = !parse_bool(body, "wifi_scan",          !cfg.wifi_scan_off);
         cfg.deep_sleep_on        = parse_bool(body, "deep_sleep",          cfg.deep_sleep_on);
         cfg.deep_sleep_delay_ms  = parse_int (body, "deep_sleep_delay",   cfg.deep_sleep_delay_ms / 1000) * 1000;
         cfg.user_appop_restrict  = parse_bool(body, "user_appop_restrict", cfg.user_appop_restrict);
@@ -301,6 +303,20 @@ private:
         oss << "HTTP/1.1 " << status << "\r\n"
             << "Content-Type: application/json\r\n"
             << "Access-Control-Allow-Origin: *\r\n"
+            << "Content-Length: " << body.size() << "\r\n"
+            << "\r\n" << body;
+        return oss.str();
+    }
+
+    // 专门用于配置响应，增加 no-cache 头
+    std::string json_response_no_cache(const std::string& body) {
+        std::ostringstream oss;
+        oss << "HTTP/1.1 200 OK\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Access-Control-Allow-Origin: *\r\n"
+            << "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+            << "Pragma: no-cache\r\n"
+            << "Expires: 0\r\n"
             << "Content-Length: " << body.size() << "\r\n"
             << "\r\n" << body;
         return oss.str();
