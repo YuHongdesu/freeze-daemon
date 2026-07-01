@@ -1,4 +1,3 @@
-// src/core/app_label_cache.h
 #pragma once
 #include <string>
 #include <unordered_map>
@@ -18,9 +17,7 @@ public:
         std::lock_guard<std::mutex> lk(mutex_);
         cache_.clear();
 
-        // 遍历所有已安装包，调用 dumpsys package 获取标签
         auto append_from_pm = [this](const char* filter) {
-            // 获取包名列表
             std::string pkg_cmd = "pm list packages -U " + std::string(filter) + " 2>/dev/null";
             FILE* pkg_pipe = popen(pkg_cmd.c_str(), "r");
             if (!pkg_pipe) return;
@@ -34,7 +31,6 @@ public:
                 std::string pkg = line.substr(p + 8, u - (p + 8) - 1);
                 if (pkg.empty()) continue;
 
-                // 获取应用名
                 std::string label = get_label_internal(pkg);
                 if (!label.empty()) {
                     cache_[pkg] = label;
@@ -64,11 +60,9 @@ private:
         std::string label;
         if (fgets(buf, sizeof(buf), pipe)) {
             std::string line(buf);
-            // 格式: "application-label:微信"
             auto pos = line.find("application-label:");
             if (pos != std::string::npos) {
-                label = line.substr(pos + 19); // 19 = len("application-label:")
-                // 去除换行和空白
+                label = line.substr(pos + 19);
                 label.erase(std::remove_if(label.begin(), label.end(),
                     [](unsigned char c){ return c == '\n' || c == '\r' || c == ' '; }),
                     label.end());
