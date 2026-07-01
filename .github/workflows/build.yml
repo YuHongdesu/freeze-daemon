@@ -88,6 +88,9 @@ jobs:
           sed -i '/#define.*NLS/d' src/config.h 2>/dev/null || true
           sed -i '/USE_ZSTD/d' src/config.h || true
 
+          # 删除冲突的 crc32.c，避免与 zlib 的 crc32 符号重复
+          rm -f src/crc32.c
+
           echo "----- Makefile after sed patch (grep CC) -----"
           grep -n '\$(CC)' Makefile || echo "警告：没有匹配到 \$(CC)"
 
@@ -104,7 +107,7 @@ jobs:
           cd /tmp/libbpf/src
           mkdir -p /tmp/libbpf-build
 
-          # libbpf 1.7.0 已内置 __poll_t 定义，不再需要 -D 宏覆盖
+          # libbpf 1.7.0 已内置 __poll_t 定义，无需手动 -D 覆盖
           CC=$CC AR=$AR \
           EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
           LDLIBS="-lelf -lz" \
