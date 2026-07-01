@@ -104,12 +104,9 @@ jobs:
           cd /tmp/libbpf/src
           mkdir -p /tmp/libbpf-build
 
-          # 修复 NDK r27 中 __poll_t 未定义问题
-          POLL_FIX="-D__poll_t=unsigned\ int"
-
-          # 关键：显式设置 PREFIX= 使头文件安装到 $(DESTDIR)/include/bpf
+          # libbpf 1.7.0 已内置 __poll_t 定义，不再需要 -D 宏覆盖
           CC=$CC AR=$AR \
-          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include ${POLL_FIX}" \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
           LDLIBS="-lelf -lz" \
           NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
           OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX PREFIX= \
@@ -117,7 +114,7 @@ jobs:
             || { echo "FATAL: libbpf install_headers failed, see log above"; exit 1; }
 
           CC=$CC AR=$AR \
-          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include ${POLL_FIX}" \
+          EXTRA_CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
           LDLIBS="-lelf -lz" \
           NO_PKG_CONFIG=1 BUILD_STATIC_ONLY=y \
           OBJDIR=/tmp/libbpf-build DESTDIR=$PREFIX \
