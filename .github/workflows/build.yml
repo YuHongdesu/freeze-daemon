@@ -75,7 +75,8 @@ jobs:
           test -x "$CC" || { echo "FATAL: NDK clang not found at $CC"; exit 1; }
 
           echo "=== [1/3] zlib for arm64 ==="
-          curl -fsSL https://zlib.net/fossils/zlib-1.3.1.tar.gz -o /tmp/zlib.tar.gz
+          # 使用 GitHub 镜像，避免 zlib.net 偶尔返回 415 错误
+          curl -fsSL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz -o /tmp/zlib.tar.gz
           mkdir -p /tmp/zlib && tar -xzf /tmp/zlib.tar.gz -C /tmp/zlib --strip-components=1
           cd /tmp/zlib
           CHOST=$TARGET CC=$CC AR=$AR RANLIB=$RANLIB \
@@ -93,12 +94,6 @@ jobs:
           mkdir -p /tmp/libelf && tar -xzf /tmp/libelf.tar.gz -C /tmp/libelf --strip-components=1
           cd /tmp/libelf
 
-          # --- 诊断输出：把它的 Makefile 全文打进日志 -----------------
-          # 上一轮失败是因为我们假设了它用标准的 CFLAGS 变量接收外部参数，
-          # 但实际编译命令里完全没出现我们传的 --sysroot/-I，说明它的
-          # Makefile 用了别的变量名或直接硬编码了参数。与其再猜一次变量名，
-          # 这次直接打印出来，如果本步骤仍然失败，日志里就有权威原文可看，
-          # 不用再靠搜索引擎拼凑第三方仓库的构建细节。
           echo "----- BEGIN libelf Makefile -----"
           cat Makefile
           echo "----- END libelf Makefile -----"
@@ -106,22 +101,11 @@ jobs:
           cat src/config.h
           echo "----- END libelf src/config.h -----"
 
-          # --- 直接改写 Makefile 文本本身，不依赖任何环境变量传递 --------
-          # 不管它内部用什么变量名组织 CFLAGS，只要能找到调用编译器的那
-          # 一行（含 $(CC) 的行），就把我们的 sysroot / 头文件搜索路径
-          # 追加进去。这样不需要猜它的变量名对不对，因为是直接编辑执行
-          # 命令本身。同一时间把 libintl.h 的占位头目录也一起加进去，
-          # 一次修复两个问题（架构不对 + libintl.h 缺失）。
           NDK_SHIM_INCLUDE=$GITHUB_WORKSPACE/scripts/ndk-shims
           sed -i "s|\$(CC)|\$(CC) --sysroot=$SYSROOT -I$NDK_SHIM_INCLUDE -I$PREFIX/include|g" Makefile
 
-          # 关闭 NLS/gettext：如果 config.h 里有 ENABLE_NLS 定义就删掉；
-          # 就算这一步没匹配到任何内容也不报错（|| true），因为上面的
-          # libintl.h 占位头是更根本的兜底手段，两者任一生效即可
           sed -i '/ENABLE_NLS/d' src/config.h 2>/dev/null || true
           sed -i '/#define.*NLS/d' src/config.h 2>/dev/null || true
-
-          # 关闭 zstd 支持以简化依赖面（我们的 .bpf.o 不使用压缩 ELF 段）
           sed -i '/USE_ZSTD/d' src/config.h || true
 
           echo "----- Makefile after sed patch (grep CC) -----"
@@ -140,10 +124,7 @@ jobs:
           cd /tmp/libbpf/src
           mkdir -p /tmp/libbpf-build
 
-          # ★★★ 修复点：定义 __poll_t 为 unsigned int ★★★
-          # NDK r27 的 <linux/eventpoll.h> 中 EPOLLIN 宏使用 __poll_t，
-          # 但该类型在用户空间编译环境中未声明。通过 EXTRA_CFLAGS 添加
-          # 宏定义即可绕过此问题。
+          # 修复 NDK r27 中 <linux/eventpoll.h> 使用 __poll_t 但未声明的问题
           POLL_FIX="-D__poll_t=unsigned\ int"
 
           CC=$CC AR=$AR \
