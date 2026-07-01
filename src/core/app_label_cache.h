@@ -1,8 +1,10 @@
+// src/core/app_label_cache.h
 #pragma once
 #include <string>
 #include <unordered_map>
 #include <mutex>
 #include <cstdio>
+#include <algorithm>
 #include "util/logger.h"
 
 class AppLabelCache {
@@ -12,38 +14,33 @@ public:
         return inst;
     }
 
-    // 启动时调用一次，批量获取所有应用标签
     void build() {
         std::lock_guard<std::mutex> lk(mutex_);
         cache_.clear();
 
+        // 遍历所有已安装包，调用 dumpsys package 获取标签
         auto append_from_pm = [this](const char* filter) {
-            // 使用 cmd package get-app-label 获取标签，输出格式：package:pkg label:标签
-            std::string cmd = "pm list packages -U ";
-            cmd += filter;
-            cmd += " 2>/dev/null | while read line; do "
-                   "pkg=$(echo $line | sed 's/package:\\(.*\\) uid:.*/\\1/'); "
-                   "label=$(cmd package get-app-label \"$pkg\" 2>/dev/null); "
-                   "echo \"package:$pkg label:$label\"; "
-                   "done";
+            // 获取包名列表
+            std::string pkg_cmd = "pm list packages -U " + std::string(filter) + " 2>/dev/null";
+            FILE* pkg_pipe = popen(pkg_cmd.c_str(), "r");
+            if (!pkg_pipe) return;
 
-            FILE* pipe = popen(cmd.c_str(), "r");
-            if (!pipe) return;
-            char buf[512];
-            while (fgets(buf, sizeof(buf), pipe)) {
-                std::string line(buf);
+            char pkg_line[512];
+            while (fgets(pkg_line, sizeof(pkg_line), pkg_pipe)) {
+                std::string line(pkg_line);
                 auto p = line.find("package:");
                 if (p == std::string::npos) continue;
-                auto e = line.find(" label:");
-                if (e == std::string::npos) continue;
-                std::string pkg = line.substr(p + 8, e - (p + 8));
-                std::string label = line.substr(e + 7);
-                // 去除尾部换行和空白
-                while (!label.empty() && (label.back() == '\n' || label.back() == '\r'))
-                    label.pop_back();
-                if (!label.empty()) cache_[pkg] = label;
+                auto u = line.find("uid:");
+                std::string pkg = line.substr(p + 8, u - (p + 8) - 1);
+                if (pkg.empty()) continue;
+
+                // 获取应用名
+                std::string label = get_label_internal(pkg);
+                if (!label.empty()) {
+                    cache_[pkg] = label;
+                }
             }
-            pclose(pipe);
+            pclose(pkg_pipe);
         };
 
         append_from_pm("-3");   // 用户应用
@@ -59,6 +56,28 @@ public:
     }
 
 private:
+    std::string get_label_internal(const std::string& pkg) {
+        std::string cmd = "dumpsys package " + pkg + " 2>/dev/null | grep 'application-label:' | head -1";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) return "";
+        char buf[512] = {};
+        std::string label;
+        if (fgets(buf, sizeof(buf), pipe)) {
+            std::string line(buf);
+            // 格式: "application-label:微信"
+            auto pos = line.find("application-label:");
+            if (pos != std::string::npos) {
+                label = line.substr(pos + 19); // 19 = len("application-label:")
+                // 去除换行和空白
+                label.erase(std::remove_if(label.begin(), label.end(),
+                    [](unsigned char c){ return c == '\n' || c == '\r' || c == ' '; }),
+                    label.end());
+            }
+        }
+        pclose(pipe);
+        return label;
+    }
+
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::string> cache_;
 };
