@@ -13,6 +13,7 @@
 #include "util/reboot_flag.h"
 #include "core/config_store.h"
 #include "core/app_list.h"
+#include "core/app_label_cache.h"
 #include "core/freeze_engine.h"
 #include "platform/cgroup_manager.h"
 #include "platform/bpf_loader.h"
@@ -21,8 +22,6 @@
 #include "api/http_server.h"
 
 constexpr const char* TAG = "Main";
-
-// ── 信号处理 ─────────────────────────────────────────────
 
 static std::atomic<bool> g_running{true};
 
@@ -34,8 +33,6 @@ static void register_signals() {
     signal(SIGPIPE, SIG_IGN);
 }
 
-// ── PID 文件 ─────────────────────────────────────────────
-
 static void write_pid_file() {
     std::ofstream f(Path::PID_FILE);
     if (f.is_open()) f << getpid();
@@ -44,8 +41,6 @@ static void write_pid_file() {
 static void remove_pid_file() {
     ::unlink(Path::PID_FILE);
 }
-
-// ── 初始化序列 ────────────────────────────────────────────
 
 static bool init_cgroup() {
     if (!CgroupManager::init_cgroup_tree()) {
@@ -71,20 +66,38 @@ static void init_lists(EventDispatcher& dispatcher) {
     dispatcher.refresh_uid_cache();
 }
 
+// 通过 shell fallback 维持前后台状态，并驱动冻结引擎
 static void schedule_top_app_refresh(BpfLoader& loader) {
     constexpr int REFRESH_INTERVAL_MS = 30000;
-    constexpr int FALLBACK_TRIGGER_COUNT = 3;
+
+    struct SharedState {
+        std::string last_foreground_pkg;
+    };
+    auto state = std::make_shared<SharedState>();
 
     auto refresh_fn = std::make_shared<std::function<void()>>();
-    *refresh_fn = [&loader, refresh_fn]() {
-        bool ok = loader.refresh_top_app_cgroup();
+    *refresh_fn = [&loader, state, refresh_fn]() {
+        // 尝试刷新 eBPF cgroup id（如果可用），失败也无妨
+        loader.refresh_top_app_cgroup();
 
-        if (!ok && loader.consecutive_fail_count() >= FALLBACK_TRIGGER_COUNT) {
-            std::string pkg = ForegroundFallback::detect_foreground_package();
-            if (!pkg.empty()) {
-                LOG_W("Main", "eBPF top-app detection degraded, shell fallback resolved: " + pkg);
-                FreezeEngine::instance().on_app_foreground(pkg);
+        std::string current_pkg = ForegroundFallback::detect_foreground_package();
+        if (current_pkg.empty()) {
+            TimerManager::instance().schedule(REFRESH_INTERVAL_MS, *refresh_fn);
+            return;
+        }
+
+        // 前后台切换逻辑
+        if (current_pkg != state->last_foreground_pkg) {
+            if (!state->last_foreground_pkg.empty()) {
+                LOG_I("Main", "App switched to background: " + state->last_foreground_pkg);
+                FreezeEngine::instance().on_app_background(state->last_foreground_pkg);
             }
+            LOG_I("Main", "App switched to foreground: " + current_pkg);
+            FreezeEngine::instance().on_app_foreground(current_pkg);
+            state->last_foreground_pkg = current_pkg;
+        } else {
+            // 前台未变，但保持 RunningCache 中有该应用（防止被其他逻辑清空）
+            FreezeEngine::instance().on_app_foreground(current_pkg);
         }
 
         TimerManager::instance().schedule(REFRESH_INTERVAL_MS, *refresh_fn);
@@ -92,49 +105,39 @@ static void schedule_top_app_refresh(BpfLoader& loader) {
     (*refresh_fn)();
 }
 
-// ── 主函数 ────────────────────────────────────────────────
-
 int main() {
     register_signals();
     write_pid_file();
 
     LOG_I(TAG, "freeze_daemon starting");
-
     RebootFlag::clear_all();
 
-    // 1. 加载配置
     ConfigStore::instance().load();
 
-    // 2. 初始化 cgroup 子树
     if (!init_cgroup()) return 1;
 
-    // 3. 启动定时器线程
+    // 构建应用标签缓存（需在启动 HTTP 之前完成）
+    AppLabelCache::instance().build();
+
     TimerManager::instance().start();
 
-    // 4. 加载 eBPF + 绑定事件回调（失败不退出）
     BpfLoader       bpf_loader;
     EventDispatcher dispatcher;
     bool bpf_ok = init_bpf(bpf_loader, dispatcher);
 
     if (bpf_ok) {
-        // 注入 our_frozen_cgroups map 指针
         FreezeEngine::instance().set_frozen_cgroups_map(bpf_loader.frozen_cgroup_map());
-
-        // 周期刷新 top_app_cgroup_id
-        schedule_top_app_refresh(bpf_loader);
     }
 
-    // 5. 加载名单 + 刷新 uid 缓存
-    init_lists(dispatcher);
+    // 启动前台检测调度（无论 BPF 是否成功）
+    schedule_top_app_refresh(bpf_loader);
 
-    // 5.5 启动系统 Freezer 防御层
+    init_lists(dispatcher);
     FreezeEngine::instance().start_freezer_guard();
 
-    // 6. 启动 HTTP API
     HttpServer http;
     if (!http.start()) return 1;
 
-    // 7. 启动 eBPF 后台事件循环（仅当 BPF 加载成功）
     LOG_I(TAG, "Running. PID=" + std::to_string(getpid()));
     if (bpf_ok) {
         bpf_loader.start_loop();
@@ -142,7 +145,6 @@ int main() {
 
     while (g_running) { pause(); }
 
-    // ── 清理 ─────────────────────────────────────────────
     LOG_I(TAG, "Shutting down");
     if (bpf_ok) bpf_loader.stop();
     http.stop();
